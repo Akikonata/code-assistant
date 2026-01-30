@@ -1,0 +1,74 @@
+{
+  "name": "code-assistant",
+  "displayName": "智能代码助手",
+  "description": "一个基于大模型的智能代码助手，支持自定义 API 和多种工具",
+  "version": "0.0.1",
+  "publisher": "code-assistant",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "code-assistant",
+          "title": "智能代码助手",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "code-assistant": [
+        {
+          "type": "webview",
+          "id": "codeAssistant.sidebar",
+          "name": "智能助手"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeAssistant.newChat",
+        "title": "新建对话",
+        "category": "Code Assistant"
+      },
+      {
+        "command": "codeAssistant.clearHistory",
+        "title": "清除历史",
+        "category": "Code Assistant"
+      },
+      {
+        "command": "codeAssistant.openSettings",
+        "title": "打开设置",
+        "category": "Code Assistant"
+      }
+    ],
+    "configuration": {}
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.config.js",
+    "watch": "node esbuild.config.js --watch",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.2"
+  },
+  "dependencies": {
+    "glob": "^10.3.10",
+    "marked": "^11.1.0",
+    "highlight.js": "^11.9.0"
+  }
+}
