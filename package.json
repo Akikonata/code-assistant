@@ -4,6 +4,10 @@
   "description": "一个基于大模型的智能代码助手，支持自定义 API 和多种工具",
   "version": "0.0.1",
   "publisher": "code-assistant",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Akikonata/code-assistant.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
