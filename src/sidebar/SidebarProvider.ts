@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
 import { getResolvedConfig } from "../config/settings";
 import { updateStoreValue } from "../config/store";
 import { LLMClient } from "../llm/client";
@@ -26,6 +28,121 @@ function messageToPlainText(content: string | ContentPart[] | undefined): string
     .join("\n");
 }
 
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+const VIDEO_EXTENSIONS = [".mp4", ".mpeg", ".mov", ".avi", ".x-flv", ".mpg", ".webm", ".wmv", ".3gpp"];
+
+function extractFilePaths(text: string): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const patterns = [
+    { pattern: /["']([^"']+\.[a-zA-Z0-9]{2,4})["']/g, name: "引号内路径" },
+    { pattern: /\/(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "Unix绝对路径" },
+    { pattern: /[A-Za-z]:\\(?:[^\s\n"'<>|*?]+\\)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "Windows绝对路径" },
+    { pattern: /(?:\.\/|\.\.\/)(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "相对路径" },
+    { pattern: /\b([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})(?:\s|$|[\n\r]|[,;:])/g, name: "普通文件名" },
+    { pattern: /(?:[:=]\s*|->\s*|=>\s*)([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})/g, name: "符号后路径" },
+  ];
+  for (const { pattern } of patterns) {
+    const matches = Array.from(text.matchAll(pattern));
+    for (const match of matches) {
+      const filePath = (match[1] || match[0]).trim();
+      if (filePath && !seen.has(filePath)) {
+        if (
+          !filePath.startsWith("http") &&
+          !filePath.includes("@") &&
+          !filePath.startsWith("data:") &&
+          !filePath.startsWith("mailto:")
+        ) {
+          paths.push(filePath);
+          seen.add(filePath);
+        }
+      }
+    }
+  }
+  return paths;
+}
+
+function isImageFile(filePath: string): boolean {
+  return IMAGE_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
+}
+
+function isVideoFile(filePath: string): boolean {
+  return VIDEO_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
+}
+
+function resolveFilePath(filePath: string): string | null {
+  try {
+    if (path.isAbsolute(filePath)) {
+      return fs.existsSync(filePath) ? filePath : null;
+    }
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders?.length) {
+      const resolved = path.resolve(workspaceFolders[0].uri.fsPath, filePath);
+      if (fs.existsSync(resolved)) return resolved;
+    }
+    const cwdResolved = path.resolve(process.cwd(), filePath);
+    return fs.existsSync(cwdResolved) ? cwdResolved : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fileToBase64(filePath: string): Promise<string | null> {
+  try {
+    const resolved = resolveFilePath(filePath);
+    if (!resolved) return null;
+    const buf = await fs.promises.readFile(resolved);
+    return buf.toString("base64");
+  } catch {
+    return null;
+  }
+}
+
+async function extractMediaFromToolResult(
+  toolResult: string,
+): Promise<Array<{ name: string; type: string; base64: string; isImage: boolean; isVideo: boolean }>> {
+  const attachments: Array<{
+    name: string;
+    type: string;
+    base64: string;
+    isImage: boolean;
+    isVideo: boolean;
+  }> = [];
+  const filePaths = extractFilePaths(toolResult);
+  const processed = new Set<string>();
+  for (const filePath of filePaths) {
+    const normalized = path.normalize(filePath);
+    if (processed.has(normalized)) continue;
+    const resolved = resolveFilePath(filePath);
+    if (!resolved) continue;
+    processed.add(normalized);
+    if (isImageFile(resolved)) {
+      const base64 = await fileToBase64(resolved);
+      if (base64) {
+        attachments.push({
+          name: path.basename(resolved),
+          type: path.extname(resolved).slice(1).toLowerCase(),
+          base64,
+          isImage: true,
+          isVideo: false,
+        });
+      }
+    } else if (isVideoFile(resolved)) {
+      const base64 = await fileToBase64(resolved);
+      if (base64) {
+        attachments.push({
+          name: path.basename(resolved),
+          type: path.extname(resolved).slice(1).toLowerCase(),
+          base64,
+          isImage: false,
+          isVideo: true,
+        });
+      }
+    }
+  }
+  return attachments;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -50,6 +167,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       isVideo: boolean;
     }>;
   } | null = null;
+  private _lastToolMediaAttachments: Array<{
+    name: string;
+    type: string;
+    base64: string;
+    isImage: boolean;
+    isVideo: boolean;
+  }> = [];
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -226,30 +350,56 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     const hasContent = content && content.trim();
     const hasAttachments = attachments && attachments.length > 0;
-    if (!hasContent && !hasAttachments) {
-      return;
-    }
+    const hasToolMedia = this._lastToolMediaAttachments.length > 0;
+    if (!hasContent && !hasAttachments && !hasToolMedia) return;
+
+    const allAttachments = [
+      ...(attachments || []),
+      ...this._lastToolMediaAttachments,
+    ];
+    const currentToolMediaCount = this._lastToolMediaAttachments.length;
 
     this._lastUserRequest = {
       content: originalContent,
-      attachments: hasAttachments ? [...attachments!] : undefined,
+      attachments: allAttachments.length > 0 ? allAttachments : undefined,
     };
 
     this._isProcessing = true;
 
     let messageContent: string | ContentPart[];
     const textContent = content.trim();
+    const hasAllAttachments = allAttachments.length > 0;
 
-    if (hasAttachments || skillHint) {
+    if (hasAllAttachments || skillHint) {
       const parts: ContentPart[] = [];
+      if (hasToolMedia && currentToolMediaCount > 0) {
+        const toolMediaNames = this._lastToolMediaAttachments
+          .slice(0, currentToolMediaCount)
+          .map((att) => att.name)
+          .join("、");
+        const imageCount = this._lastToolMediaAttachments
+          .slice(0, currentToolMediaCount)
+          .filter((att) => att.isImage).length;
+        const videoCount = currentToolMediaCount - imageCount;
+        const mediaDesc =
+          imageCount > 0 && videoCount > 0
+            ? `${imageCount} 个图片和 ${videoCount} 个视频`
+            : imageCount > 0
+              ? `${imageCount} 个图片`
+              : `${videoCount} 个视频`;
+        parts.push({
+          type: "text",
+          text: `【系统提示】上一步工具执行生成了 ${mediaDesc}文件（${toolMediaNames}），系统已自动将这些媒体文件转换为 base64 编码并以 image_url/video_url 格式附加到当前消息中。你可以直接使用这些媒体文件来完成后续任务，无需使用 Read 工具读取它们。`,
+        });
+      }
       if (skillHint) {
         parts.push({
           type: "text",
           text: `用户通过斜杠命令显式指定使用 skill/工具 "${skillHint}"，请优先调用该工具来完成后续任务。`,
         });
       }
-      if (hasAttachments) {
-        for (const att of attachments!) {
+      if (hasAllAttachments) {
+        for (const att of allAttachments) {
           if (att.isImage) {
             const ext = att.name.split(".").pop()?.toLowerCase() || "png";
             const base64Data = att.base64.includes(",")
@@ -275,6 +425,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
       if (textContent) {
         parts.push({ type: "text", text: textContent });
+      } else if (hasAllAttachments && parts.length === 0) {
+        parts.push({ type: "text", text: "" });
       }
       messageContent = parts;
     } else {
@@ -283,12 +435,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     const userMessage: Message = { role: "user", content: messageContent };
     this._messages.push(userMessage);
+    if (currentToolMediaCount > 0 && allAttachments.length > 0) {
+      this._lastToolMediaAttachments = [];
+    }
     this.saveCurrentSession();
 
     this._view?.webview.postMessage({
       type: "userMessage",
       message: hasContent ? originalContent : "[包含图片/视频]",
-      attachments: hasAttachments ? attachments : undefined,
+      attachments: hasAllAttachments ? allAttachments : undefined,
     });
 
     this._view?.webview.postMessage({
@@ -314,6 +469,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private async processWithLLM() {
     const tools = this._toolExecutor.getToolDefinitions();
     let continueLoop = true;
+    let injectedToolMediaCount = 0;
 
     while (continueLoop && this._isProcessing) {
       let fullContent = "";
@@ -411,6 +567,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               toolCallId: toolCall.id,
               result,
             });
+            if (result.success && typeof result.result === "string") {
+              try {
+                const mediaAttachments = await extractMediaFromToolResult(result.result);
+                if (mediaAttachments.length > 0) {
+                  const existing = new Set(this._lastToolMediaAttachments.map((a) => a.name));
+                  for (const att of mediaAttachments) {
+                    if (!existing.has(att.name)) {
+                      this._lastToolMediaAttachments.push(att);
+                    }
+                  }
+                }
+              } catch {
+                // 提取失败不影响主流程
+              }
+            }
           } catch (error) {
             const errorMessage =
               error instanceof Error ? error.message : "工具执行失败";
@@ -425,6 +596,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               error: errorMessage,
             });
           }
+        }
+        if (this._lastToolMediaAttachments.length > injectedToolMediaCount) {
+          const newAttachments = this._lastToolMediaAttachments.slice(injectedToolMediaCount);
+          const parts: ContentPart[] = [
+            { type: "text", text: "【系统】上一步工具生成了以下媒体文件，已附上供你参考。" },
+          ];
+          for (const att of newAttachments) {
+            if (att.isImage) {
+              const ext = att.name.split(".").pop()?.toLowerCase() || "png";
+              const base64Data = att.base64.includes(",") ? att.base64.split(",")[1] : att.base64;
+              parts.push({
+                type: "image_url",
+                image_url: { url: `data:image/${ext};base64,${base64Data}` },
+              });
+            } else if (att.isVideo) {
+              const ext = att.name.split(".").pop()?.toLowerCase() || "mp4";
+              const base64Data = att.base64.includes(",") ? att.base64.split(",")[1] : att.base64;
+              parts.push({
+                type: "video_url",
+                video_url: { url: `data:video/${ext};base64,${base64Data}` },
+              });
+            }
+          }
+          this._messages.push({ role: "user", content: parts });
+          injectedToolMediaCount = this._lastToolMediaAttachments.length;
         }
       } else {
         continueLoop = false;
@@ -445,6 +641,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._activeSessionId = null;
     this._isProcessing = false;
     this._lastUserRequest = null;
+    this._lastToolMediaAttachments = [];
     this._context.globalState.update(ACTIVE_SESSION_ID_KEY, null);
     this._view?.webview.postMessage({
       type: "clearChat",
