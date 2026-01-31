@@ -15,7 +15,8 @@ export class ReadTool implements Tool {
       description: `读取文件内容。
 - 可以读取任意文本文件
 - 支持指定行范围（offset 和 limit）
-- 返回带行号的内容`,
+- 返回带行号的内容
+- 不要用于读取图片/视频以附加到对话；图片/视频由系统从其他工具产出中自动提取`,
       parameters: {
         type: "object",
         properties: {

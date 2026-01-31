@@ -132,7 +132,9 @@ export class BashTool implements Tool {
 
       const shell = process.platform === "win32" ? "cmd.exe" : "/bin/bash";
       const shellArgs =
-        process.platform === "win32" ? ["/c", command] : ["-c", command];
+        process.platform === "win32"
+          ? ["/c", command]
+          : ["-c", command.trimEnd().replace(/\n*$/, "") + "\nexit"];
 
       const proc = spawn(shell, shellArgs, {
         cwd,

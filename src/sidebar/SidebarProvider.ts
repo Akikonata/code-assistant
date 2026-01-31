@@ -14,7 +14,9 @@ const ACTIVE_SESSION_ID_KEY = "codeAssistant.activeSessionId";
 const MAX_SESSIONS = 30;
 const MAX_MESSAGES_PER_SESSION = 200;
 
-function messageToPlainText(content: string | ContentPart[] | undefined): string {
+function messageToPlainText(
+  content: string | ContentPart[] | undefined
+): string {
   if (content === undefined || content === null) return "";
   if (typeof content === "string") return content;
   return content
@@ -29,18 +31,45 @@ function messageToPlainText(content: string | ContentPart[] | undefined): string
 }
 
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
-const VIDEO_EXTENSIONS = [".mp4", ".mpeg", ".mov", ".avi", ".x-flv", ".mpg", ".webm", ".wmv", ".3gpp"];
+const VIDEO_EXTENSIONS = [
+  ".mp4",
+  ".mpeg",
+  ".mov",
+  ".avi",
+  ".x-flv",
+  ".mpg",
+  ".webm",
+  ".wmv",
+  ".3gpp",
+];
 
 function extractFilePaths(text: string): string[] {
   const paths: string[] = [];
   const seen = new Set<string>();
   const patterns = [
     { pattern: /["']([^"']+\.[a-zA-Z0-9]{2,4})["']/g, name: "引号内路径" },
-    { pattern: /\/(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "Unix绝对路径" },
-    { pattern: /[A-Za-z]:\\(?:[^\s\n"'<>|*?]+\\)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "Windows绝对路径" },
-    { pattern: /(?:\.\/|\.\.\/)(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g, name: "相对路径" },
-    { pattern: /\b([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})(?:\s|$|[\n\r]|[,;:])/g, name: "普通文件名" },
-    { pattern: /(?:[:=]\s*|->\s*|=>\s*)([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})/g, name: "符号后路径" },
+    {
+      pattern: /\/(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g,
+      name: "Unix绝对路径",
+    },
+    {
+      pattern:
+        /[A-Za-z]:\\(?:[^\s\n"'<>|*?]+\\)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g,
+      name: "Windows绝对路径",
+    },
+    {
+      pattern:
+        /(?:\.\/|\.\.\/)(?:[^\s\n"'<>|*?]+\/)*[^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4}/g,
+      name: "相对路径",
+    },
+    {
+      pattern: /\b([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})(?:\s|$|[\n\r]|[,;:])/g,
+      name: "普通文件名",
+    },
+    {
+      pattern: /(?:[:=]\s*|->\s*|=>\s*)([^\s\n"'<>|*?]+\.[a-zA-Z0-9]{2,4})/g,
+      name: "符号后路径",
+    },
   ];
   for (const { pattern } of patterns) {
     const matches = Array.from(text.matchAll(pattern));
@@ -87,6 +116,45 @@ function resolveFilePath(filePath: string): string | null {
   }
 }
 
+const EXTRACTED_MEDIA_TRACE_DIR = "code-assistant-extracted";
+
+function getExtractedMediaTraceDir(): string | null {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders?.length) return null;
+  const dir = path.join(workspaceFolders[0].uri.fsPath, EXTRACTED_MEDIA_TRACE_DIR);
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+function getUniqueTraceFilePath(targetDir: string, resolvedPath: string): string {
+  const base = path.basename(resolvedPath);
+  const ext = path.extname(base);
+  const nameWithoutExt = base.slice(0, base.length - ext.length);
+  let destPath = path.join(targetDir, base);
+  let i = 0;
+  while (fs.existsSync(destPath)) {
+    i += 1;
+    destPath = path.join(targetDir, `${nameWithoutExt}_${i}${ext}`);
+  }
+  return destPath;
+}
+
+async function copyFileToTraceDir(resolvedPath: string): Promise<string | null> {
+  const targetDir = getExtractedMediaTraceDir();
+  if (!targetDir) return null;
+  try {
+    const destPath = getUniqueTraceFilePath(targetDir, resolvedPath);
+    await fs.promises.copyFile(resolvedPath, destPath);
+    return destPath;
+  } catch {
+    return null;
+  }
+}
+
 async function fileToBase64(filePath: string): Promise<string | null> {
   try {
     const resolved = resolveFilePath(filePath);
@@ -99,8 +167,16 @@ async function fileToBase64(filePath: string): Promise<string | null> {
 }
 
 async function extractMediaFromToolResult(
-  toolResult: string,
-): Promise<Array<{ name: string; type: string; base64: string; isImage: boolean; isVideo: boolean }>> {
+  toolResult: string
+): Promise<
+  Array<{
+    name: string;
+    type: string;
+    base64: string;
+    isImage: boolean;
+    isVideo: boolean;
+  }>
+> {
   const attachments: Array<{
     name: string;
     type: string;
@@ -117,6 +193,7 @@ async function extractMediaFromToolResult(
     if (!resolved) continue;
     processed.add(normalized);
     if (isImageFile(resolved)) {
+      await copyFileToTraceDir(resolved);
       const base64 = await fileToBase64(resolved);
       if (base64) {
         attachments.push({
@@ -128,6 +205,7 @@ async function extractMediaFromToolResult(
         });
       }
     } else if (isVideoFile(resolved)) {
+      await copyFileToTraceDir(resolved);
       const base64 = await fileToBase64(resolved);
       if (base64) {
         attachments.push({
@@ -177,7 +255,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
-    private readonly _context: vscode.ExtensionContext,
+    private readonly _context: vscode.ExtensionContext
   ) {
     this._llmClient = new LLMClient();
     this._toolExecutor = new ToolExecutor();
@@ -186,7 +264,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken,
+    _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
 
@@ -197,7 +275,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = getWebviewContent(
       webviewView.webview,
-      this._extensionUri,
+      this._extensionUri
     );
     this.sendConfig();
 
@@ -207,7 +285,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this.sendConfig();
           this.sendSessionList();
           const activeId = this._context.globalState.get<string | null>(
-            ACTIVE_SESSION_ID_KEY,
+            ACTIVE_SESSION_ID_KEY
           );
           if (activeId && this._messages.length === 0) {
             this.loadSession(activeId);
@@ -222,7 +300,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (!this._isProcessing && this._lastUserRequest) {
             await this.handleUserMessage(
               this._lastUserRequest.content,
-              this._lastUserRequest.attachments,
+              this._lastUserRequest.attachments
             );
           }
           break;
@@ -325,7 +403,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       base64: string;
       isImage: boolean;
       isVideo: boolean;
-    }>,
+    }>
   ) {
     if (this._isProcessing) {
       return;
@@ -340,7 +418,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const restText = parts.slice(1).join(" ");
       const toolNames = this._toolExecutor.getToolNames();
       const matched = toolNames.find(
-        (name) => name.toLowerCase() === slashName.toLowerCase(),
+        (name) => name.toLowerCase() === slashName.toLowerCase()
       );
       if (matched) {
         skillHint = matched;
@@ -385,8 +463,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           imageCount > 0 && videoCount > 0
             ? `${imageCount} 个图片和 ${videoCount} 个视频`
             : imageCount > 0
-              ? `${imageCount} 个图片`
-              : `${videoCount} 个视频`;
+            ? `${imageCount} 个图片`
+            : `${videoCount} 个视频`;
         parts.push({
           type: "text",
           text: `【系统提示】上一步工具执行生成了 ${mediaDesc}文件（${toolMediaNames}），系统已自动将这些媒体文件转换为 base64 编码并以 image_url/video_url 格式附加到当前消息中。你可以直接使用这些媒体文件来完成后续任务，无需使用 Read 工具读取它们。`,
@@ -546,7 +624,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const parsedArgs = JSON.parse(toolCall.function.arguments);
             const result = await this._toolExecutor.execute(
               toolCall.function.name,
-              parsedArgs,
+              parsedArgs
             );
             let toolContent: string;
             if (result.success && result.result !== undefined) {
@@ -567,21 +645,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               toolCallId: toolCall.id,
               result,
             });
-            if (result.success && typeof result.result === "string") {
-              try {
-                const mediaAttachments = await extractMediaFromToolResult(result.result);
-                if (mediaAttachments.length > 0) {
-                  const existing = new Set(this._lastToolMediaAttachments.map((a) => a.name));
-                  for (const att of mediaAttachments) {
-                    if (!existing.has(att.name)) {
-                      this._lastToolMediaAttachments.push(att);
-                    }
-                  }
-                }
-              } catch {
-                // 提取失败不影响主流程
-              }
-            }
           } catch (error) {
             const errorMessage =
               error instanceof Error ? error.message : "工具执行失败";
@@ -597,22 +660,63 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
           }
         }
+        for (const toolCall of toolCalls) {
+          if (!this._isProcessing) break;
+          const toolMsg = this._messages.find(
+            (m) => m.role === "tool" && m.tool_call_id === toolCall.id
+          );
+          if (
+            toolMsg &&
+            typeof toolMsg.content === "string" &&
+            toolCall.function.name !== "Read"
+          ) {
+            try {
+              const mediaAttachments = await extractMediaFromToolResult(
+                toolMsg.content
+              );
+              if (mediaAttachments.length > 0) {
+                for (const att of mediaAttachments) {
+                  const sameContentIdx =
+                    this._lastToolMediaAttachments.findIndex(
+                      (a) => a.base64 === att.base64
+                    );
+                  if (sameContentIdx >= 0) {
+                    this._lastToolMediaAttachments[sameContentIdx] = att;
+                  } else {
+                    this._lastToolMediaAttachments.push(att);
+                  }
+                }
+              }
+            } catch {
+              // 提取失败不影响主流程
+            }
+          }
+        }
         if (this._lastToolMediaAttachments.length > injectedToolMediaCount) {
-          const newAttachments = this._lastToolMediaAttachments.slice(injectedToolMediaCount);
+          const newAttachments = this._lastToolMediaAttachments.slice(
+            injectedToolMediaCount
+          );
           const parts: ContentPart[] = [
-            { type: "text", text: "【系统】上一步工具生成了以下媒体文件，已附上供你参考。" },
+            {
+              type: "text",
+              text: "【系统】上一步工具生成了以下媒体文件，已附上供你参考。",
+            },
           ];
           for (const att of newAttachments) {
             if (att.isImage) {
               const ext = att.name.split(".").pop()?.toLowerCase() || "png";
-              const base64Data = att.base64.includes(",") ? att.base64.split(",")[1] : att.base64;
+              const base64Data = att.base64.includes(",")
+                ? att.base64.split(",")[1]
+                : att.base64;
               parts.push({
                 type: "image_url",
                 image_url: { url: `data:image/${ext};base64,${base64Data}` },
               });
             } else if (att.isVideo) {
               const ext = att.name.split(".").pop()?.toLowerCase() || "mp4";
-              const base64Data = att.base64.includes(",") ? att.base64.split(",")[1] : att.base64;
+              const base64Data = att.base64.includes(",")
+                ? att.base64.split(",")[1]
+                : att.base64;
               parts.push({
                 type: "video_url",
                 video_url: { url: `data:video/${ext};base64,${base64Data}` },
@@ -749,7 +853,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(
-        `对话导出_${new Date().toISOString().slice(0, 10)}.md`,
+        `对话导出_${new Date().toISOString().slice(0, 10)}.md`
       ),
       filters: { Markdown: ["md"], "Plain Text": ["txt"] },
     });
@@ -762,10 +866,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       lines.push(`${label}:\n${rawText || ""}\n\n`);
     }
     const content = lines.join("");
-    await vscode.workspace.fs.writeFile(
-      uri,
-      Buffer.from(content, "utf-8"),
-    );
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf-8"));
     vscode.window.showInformationMessage(`已导出到 ${uri.fsPath}`);
   }
 
