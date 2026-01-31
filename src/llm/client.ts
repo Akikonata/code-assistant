@@ -152,6 +152,7 @@ export class LLMClient {
       const decoder = new TextDecoder();
       let buffer = "";
       let reasoningContent = "";
+      let reasoningContentYieldedInStream = false; // 是否已在流中逐段发送过，避免末尾再发整段导致重复
       let toolCallsSent = false; // 防止重复发送 tool calls
       const toolCallsInProgress = new Map<
         number,
@@ -181,6 +182,7 @@ export class LLMClient {
             // 处理 reasoning_content（思考过程）- 实时流式发送
             if (delta.reasoning_content) {
               reasoningContent += delta.reasoning_content;
+              reasoningContentYieldedInStream = true;
               yield {
                 type: "reasoning_content",
                 reasoningContent: delta.reasoning_content,
@@ -240,8 +242,8 @@ export class LLMClient {
               !toolCallsSent
             ) {
               toolCallsSent = true; // 标记已发送，防止重复
-              // 先发送累积的 reasoning_content
-              if (reasoningContent) {
+              // 仅当思考内容未在流中逐段发送过时，才在此处发整段（避免重复）
+              if (reasoningContent && !reasoningContentYieldedInStream) {
                 yield {
                   type: "reasoning_content",
                   reasoningContent,
@@ -269,8 +271,8 @@ export class LLMClient {
         }
       }
 
-      // 如果有未发送的 reasoning_content（非工具调用场景）
-      if (reasoningContent && toolCallsInProgress.size === 0) {
+      // 非工具调用场景下，仅当思考内容未在流中逐段发送过时才发整段（避免末尾重复显示）
+      if (reasoningContent && toolCallsInProgress.size === 0 && !reasoningContentYieldedInStream) {
         yield {
           type: "reasoning_content",
           reasoningContent,
