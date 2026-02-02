@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 
 export function getWebviewContent(
   webview: vscode.Webview,
-  extensionUri: vscode.Uri,
+  extensionUri: vscode.Uri
 ): string {
   // 获取 nonce 用于 CSP
   const nonce = getNonce();
@@ -12,7 +12,7 @@ export function getWebviewContent(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource}; img-src data: ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource}; img-src data: ${webview.cspSource}; media-src data: ${webview.cspSource};">
   <title>智能代码助手</title>
   <style>
     :root {
@@ -1528,14 +1528,19 @@ export function getWebviewContent(
                 const attachmentsDiv = document.createElement('div');
                 attachmentsDiv.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;';
                 data.attachments.forEach(att => {
+                  const dataPart = att.base64 && att.base64.includes(',') ? att.base64.split(',')[1] : att.base64;
+                  const mimeBase = att.isImage ? 'image' : 'video';
+                  const ext = (att.name && att.name.split('.').pop()) || (att.isImage ? 'png' : 'mp4');
+                  const dataUrl = dataPart ? ('data:' + mimeBase + '/' + ext.toLowerCase() + ';base64,' + dataPart) : '';
                   if (att.isImage) {
                     const img = document.createElement('img');
-                    img.src = att.base64;
+                    img.src = dataUrl;
+                    img.alt = att.name || '[图片]';
                     img.style.cssText = 'max-width: 200px; max-height: 200px; border-radius: 4px; border: 1px solid var(--vscode-input-border);';
                     attachmentsDiv.appendChild(img);
                   } else if (att.isVideo) {
                     const video = document.createElement('video');
-                    video.src = att.base64;
+                    video.src = dataUrl;
                     video.controls = true;
                     video.style.cssText = 'max-width: 200px; max-height: 200px; border-radius: 4px; border: 1px solid var(--vscode-input-border);';
                     attachmentsDiv.appendChild(video);

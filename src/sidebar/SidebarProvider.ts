@@ -121,7 +121,10 @@ const EXTRACTED_MEDIA_TRACE_DIR = "code-assistant-extracted";
 function getExtractedMediaTraceDir(): string | null {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders?.length) return null;
-  const dir = path.join(workspaceFolders[0].uri.fsPath, EXTRACTED_MEDIA_TRACE_DIR);
+  const dir = path.join(
+    workspaceFolders[0].uri.fsPath,
+    EXTRACTED_MEDIA_TRACE_DIR
+  );
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     return dir;
@@ -130,7 +133,10 @@ function getExtractedMediaTraceDir(): string | null {
   }
 }
 
-function getUniqueTraceFilePath(targetDir: string, resolvedPath: string): string {
+function getUniqueTraceFilePath(
+  targetDir: string,
+  resolvedPath: string
+): string {
   const base = path.basename(resolvedPath);
   const ext = path.extname(base);
   const nameWithoutExt = base.slice(0, base.length - ext.length);
@@ -143,7 +149,9 @@ function getUniqueTraceFilePath(targetDir: string, resolvedPath: string): string
   return destPath;
 }
 
-async function copyFileToTraceDir(resolvedPath: string): Promise<string | null> {
+async function copyFileToTraceDir(
+  resolvedPath: string
+): Promise<string | null> {
   const targetDir = getExtractedMediaTraceDir();
   if (!targetDir) return null;
   try {
@@ -166,9 +174,7 @@ async function fileToBase64(filePath: string): Promise<string | null> {
   }
 }
 
-async function extractMediaFromToolResult(
-  toolResult: string
-): Promise<
+async function extractMediaFromToolResult(toolResult: string): Promise<
   Array<{
     name: string;
     type: string;
@@ -532,6 +538,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       await this.processWithLLM();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "未知错误";
+      this._lastToolMediaAttachments = [];
       this._view?.webview.postMessage({
         type: "error",
         message: errorMessage,
@@ -544,7 +551,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private sanitizeMessagesForToolCalls(): void {
+    while (this._messages.length > 0) {
+      const last = this._messages[this._messages.length - 1];
+      if (
+        last.role === "assistant" &&
+        last.tool_calls &&
+        last.tool_calls.length > 0
+      ) {
+        this._messages.pop();
+        continue;
+      }
+      break;
+    }
+    if (this._messages.length >= 2) {
+      const last = this._messages[this._messages.length - 1];
+      const prev = this._messages[this._messages.length - 2];
+      if (
+        last.role === "user" &&
+        prev.role === "assistant" &&
+        prev.tool_calls &&
+        prev.tool_calls.length > 0
+      ) {
+        this._messages.splice(this._messages.length - 2, 1);
+      }
+    }
+  }
+
   private async processWithLLM() {
+    this.sanitizeMessagesForToolCalls();
     const tools = this._toolExecutor.getToolDefinitions();
     let continueLoop = true;
     let injectedToolMediaCount = 0;
@@ -553,6 +588,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       let fullContent = "";
       let reasoningContent = "";
       let toolCalls: ToolCall[] = [];
+      let streamError = false;
 
       const stream = this._llmClient.chat(this._messages, tools);
 
@@ -586,6 +622,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             toolCall: chunk.toolCall,
           });
         } else if (chunk.type === "error") {
+          streamError = true;
           const errorMessage = chunk.error || "未知错误";
           this._view?.webview.postMessage({
             type: "error",
@@ -598,19 +635,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
 
       if (fullContent || toolCalls.length > 0) {
-        const assistantMessage: Message =
-          toolCalls.length > 0
-            ? {
-                role: "assistant",
-                content: fullContent,
-                reasoning_content: reasoningContent,
-                tool_calls: toolCalls,
-              }
-            : {
-                role: "assistant",
-                content: fullContent,
-              };
-        this._messages.push(assistantMessage);
+        if (streamError && toolCalls.length > 0) {
+          this._messages.push({
+            role: "assistant",
+            content: fullContent,
+          });
+        } else {
+          const assistantMessage: Message =
+            toolCalls.length > 0
+              ? {
+                  role: "assistant",
+                  content: fullContent,
+                  reasoning_content: reasoningContent,
+                  tool_calls: toolCalls,
+                }
+              : {
+                  role: "assistant",
+                  content: fullContent,
+                };
+          this._messages.push(assistantMessage);
+        }
       }
 
       if (toolCalls.length > 0 && this._isProcessing) {
